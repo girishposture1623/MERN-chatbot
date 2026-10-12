@@ -1,0 +1,10 @@
+# Local environment files can contain machine-specific values or secrets.
+.env
+.env.*
+!.env.development
+!.env.production
+.env.*.local
+
+node_modules/
+dist/
+.vite/
