@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import connectDB from "./config/db.js";
+import { buildCorsOptions } from "./config/cors.js";
 import chatbotRoute from "./Routes/chat.route.js";
 import { getProviderDiagnostics } from "./services/chat.service.js";
 
@@ -10,11 +11,8 @@ dotenv.config();
 
 const app = express();
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
-  }),
-);
+// Global CORS middleware also handles OPTIONS preflight requests for /api routes.
+app.use(cors(buildCorsOptions(process.env.FRONTEND_URL)));
 
 app.use(express.json({ limit: "2mb" }));
 

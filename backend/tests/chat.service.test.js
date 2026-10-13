@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { generateReplyStream, providers, summarizeProviderError } from "../services/chat.service.js";
 import { addTinyFishSearchContext } from "../services/tinyfish.service.js";
+import { buildCorsOptions } from "../config/cors.js";
 
 test("provider fallback continues after an HTTP error and streams the next provider", async () => {
   const originalStreams = providers.map((provider) => provider.stream);
@@ -130,4 +131,39 @@ test("TinyFish failures leave the conversation input unchanged", async () => {
     if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
     else process.env.TINYFISH_API_KEY = originalKey;
   }
+});
+
+test("CORS allows the current frontend and configured stable origins, with preflight enabled", async () => {
+  const options = buildCorsOptions("https://mern-chatbot-pi.vercel.app/, https://chat.example.com");
+  const checkOrigin = (origin) => new Promise((resolve, reject) => {
+    options.origin(origin, (error, allowed) => error ? reject(error) : resolve(allowed));
+  });
+
+  assert.equal(await checkOrigin("https://mern-chatbot-m3blo47nx-girish19.vercel.app"), true);
+  assert.equal(await checkOrigin("https://mern-chatbot-pi.vercel.app"), true);
+  assert.equal(await checkOrigin("https://chat.example.com"), true);
+  assert.equal(await checkOrigin("http://localhost:5173"), true);
+  await assert.rejects(checkOrigin("https://unlisted.example.com"), /not allowed by CORS/);
+  assert.equal(options.optionsSuccessStatus, 204);
+  assert.equal(options.preflightContinue, false);
+  assert.equal(options.credentials, undefined);
+});
+
+test("Gemini 404 diagnostics keep the sanitized provider error body", () => {
+  const diagnostics = summarizeProviderError({
+    status: 404,
+    error: {
+      error: {
+        code: 404,
+        message: "models/gemini-2.5-flash was not found or is not supported",
+        status: "NOT_FOUND",
+        details: [{ reason: "MODEL_NOT_FOUND", apiKey: "never-log-this" }],
+      },
+    },
+  });
+
+  assert.equal(diagnostics.status, 404);
+  assert.equal(diagnostics.body.error.message, "models/gemini-2.5-flash was not found or is not supported");
+  assert.equal(diagnostics.body.error.details[0].reason, "MODEL_NOT_FOUND");
+  assert.equal(JSON.stringify(diagnostics).includes("never-log-this"), false);
 });
