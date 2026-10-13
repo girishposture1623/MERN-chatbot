@@ -13,6 +13,43 @@ import {
 // are not visible here.
 const validId = (id) => mongoose.isValidObjectId(id);
 
+function streamHeaders(res) {
+  res.status(200);
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+}
+
+function reportGenerationFailure(res, action, error) {
+  const status = Number.isInteger(error?.status) ? error.status : undefined;
+  const code =
+    typeof error?.code === "string" && /^[a-z0-9_-]{1,64}$/i.test(error.code)
+      ? error.code
+      : undefined;
+  console.error(`[ai] ${action} failed`, {
+    name: error?.name || "Error",
+    ...(status ? { status } : {}),
+    ...(code ? { code } : {}),
+    responseStarted: res.headersSent,
+  });
+
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+
+  const hasConfiguredProvider =
+    !error?.message?.includes("No AI provider is configured");
+  res.status(502).json({
+    error: hasConfiguredProvider
+      ? "AI providers failed before returning text. Check provider credentials, model access, quotas, and backend logs."
+      : "No AI provider is configured. Add at least one provider API key to the backend environment.",
+    code: "AI_PROVIDER_FAILURE",
+  });
+}
+
 
 const conversationGet = async (req, res) => {
   try {
@@ -178,10 +215,7 @@ const messagepost =  async (req, res) => {
 
     res.status(201).json({ chat, conversation });
   } catch (error) {
-    console.error("Message error:", error.message);
-    res.status(502).json({
-      error: "All AI providers failed. Check API keys, models and quotas.",
-    });
+    reportGenerationFailure(res, "non-streaming generation", error);
   }
 }
 
@@ -219,16 +253,14 @@ const messagegetbyId =  async (req, res) => {
         content: message.trim(),
       });
 
-      res.status(200);
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("X-Accel-Buffering", "no");
-      res.setHeader("Connection", "keep-alive");
-      res.flushHeaders();
-      headersSent = true;
-
       for await (const part of generateReplyStream(messages)) {
         if (res.destroyed || res.writableEnded) return;
+        if (typeof part?.text !== "string" || !part.text) continue;
+
+        if (!headersSent) {
+          streamHeaders(res);
+          headersSent = true;
+        }
 
         selectedProvider = part.provider;
         reply += part.text;
@@ -250,17 +282,7 @@ const messagegetbyId =  async (req, res) => {
       console.log(`Reply completed using ${selectedProvider}`);
       res.end();
     } catch (error) {
-      console.error("Streaming error:", error.message);
-
-      if (!headersSent) {
-        return res.status(502).json({
-          error: "All AI providers failed. Check API keys, models and quotas.",
-        });
-      }
-    
-      if (!res.destroyed && !res.writableEnded) {
-        res.end();
-      }
+      reportGenerationFailure(res, "streaming generation", error);
     }
   }
 
@@ -324,17 +346,16 @@ const messagegetbyId =  async (req, res) => {
           content: chat.message,
         });
   
-        res.status(200);
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.setHeader("Cache-Control", "no-cache, no-transform");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders();
-  
         let reply = "";
+        let selectedProvider = null;
   
         for await (const part of generateReplyStream(messages)) {
           if (res.destroyed || res.writableEnded) return;
+          if (typeof part?.text !== "string" || !part.text) continue;
+
+          if (!res.headersSent) streamHeaders(res);
   
+          selectedProvider = part.provider;
           reply += part.text;
           res.write(part.text);
         }
@@ -349,19 +370,10 @@ const messagegetbyId =  async (req, res) => {
         conversation.updatedAt = new Date();
         await conversation.save();
   
+        console.info(`[ai] regenerate completed (provider=${selectedProvider || "unknown"})`);
         res.end();
       } catch (error) {
-        console.error("Regenerate error:", error.message);
-  
-        if (!res.headersSent) {
-          return res.status(502).json({
-            error: "Could not regenerate reply",
-          });
-        }
-  
-        if (!res.destroyed && !res.writableEnded) {
-          res.end();
-        }
+        reportGenerationFailure(res, "regenerate", error);
       }
     }
   

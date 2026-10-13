@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 
 import connectDB from "./config/db.js";
 import chatbotRoute from "./Routes/chat.route.js";
-import { providers } from "./services/chat.service.js";
+import { getProviderDiagnostics } from "./services/chat.service.js";
 
 dotenv.config();
 
@@ -28,13 +28,20 @@ async function startServer() {
 
     app.listen(port, () => {
       console.log(`Backend running on port ${port}`);
+      const providerDiagnostics = getProviderDiagnostics();
       console.log(
         "Configured providers:",
-        providers
-          .filter((provider) => provider.enabled())
-          .map((provider) => provider.name)
+        providerDiagnostics
+          .filter((provider) => provider.configured)
+          .map((provider) => `${provider.name} (${provider.model})`)
           .join(", ") || "none",
       );
+      const missingProviders = providerDiagnostics
+        .filter((provider) => !provider.configured)
+        .map((provider) => provider.name);
+      if (missingProviders.length) {
+        console.info("Providers without API keys:", missingProviders.join(", "));
+      }
     });
   } catch (error) {
     console.error("Failed to start server:", error.message);

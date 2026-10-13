@@ -7,6 +7,7 @@ import MessageList from "../components/chat/MessageList.jsx";
 import ChatSidebar from "../components/sidebar/ChatSidebar.jsx";
 import Icon from "../components/common/Icon.jsx";
 import { settleGeneration } from "../utils/chatState.js";
+import { readAssistantReply } from "../utils/readAssistantReply.js";
 import {
   loadBrowserConversations,
   saveBrowserConversations,
@@ -269,7 +270,6 @@ export default function ChatPage() {
 
     let id = activeId;
     let targetIndex = -1;
-    let reply = "";
     let inserted = false;
 
     try {
@@ -336,8 +336,16 @@ export default function ChatPage() {
         let reason = "Reply failed";
 
         try {
-          const data = await res.json();
-          reason = data.error || reason;
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const data = await res.json();
+            reason = data.error || reason;
+          } else if (!contentType.includes("text/html")) {
+            const body = (await res.text()).trim();
+            if (body) reason = body.slice(0, 300);
+          } else {
+            reason = `Backend request failed (${res.status}). Check VITE_API_URL and the Render service.`;
+          }
         } catch {
           // Keep the fallback message when the response is not JSON.
         }
@@ -345,37 +353,15 @@ export default function ChatPage() {
         throw new Error(reason);
       }
 
-      if (!res.body) {
-        throw new Error("Streaming response unavailable");
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          reply += decoder.decode(value, { stream: true });
-
-          setChats((prev) =>
-            prev.map((chat, i) =>
-              i === targetIndex
-                ? { ...chat, reply, streaming: true }
-                : chat
-            )
-          );
-        }
-
-        reply += decoder.decode();
-      } finally {
-        reader.releaseLock();
-      }
-
-      if (!reply.trim()) {
-        throw new Error("The AI returned an empty reply");
-      }
+      await readAssistantReply(res, (nextReply) => {
+        setChats((prev) =>
+          prev.map((chat, i) =>
+            i === targetIndex
+              ? { ...chat, reply: nextReply, streaming: true }
+              : chat,
+          ),
+        );
+      });
 
       // Fetch the saved MongoDB chat IDs after generation finishes.
       await refreshConversation(id);
@@ -394,7 +380,11 @@ export default function ChatPage() {
           }
         }
       } else {
-        setError(err.message || "Something went wrong");
+        setError(
+          err instanceof TypeError
+            ? "Could not reach the AI backend. Check VITE_API_URL, Render service status, and backend CORS configuration."
+            : err.message || "Something went wrong",
+        );
         setChats((prev) =>
           settleGeneration(prev, targetIndex, {
             reply: isRegenerate ? targetChat.reply : undefined,
