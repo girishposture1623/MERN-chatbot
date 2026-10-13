@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "../styles/chat.css";
 import ConversationModal from "../components/common/ConversationModal.jsx";
 import MessageComposer from "../components/chat/MessageComposer.jsx";
@@ -8,10 +8,13 @@ import ChatSidebar from "../components/sidebar/ChatSidebar.jsx";
 import Icon from "../components/common/Icon.jsx";
 import { settleGeneration } from "../utils/chatState.js";
 import {
+  loadBrowserConversations,
+  saveBrowserConversations,
+} from "../utils/browserConversations.js";
+import {
   createConversation as createConversationRequest,
   deleteConversation,
   getConversation,
-  listConversations,
   renameConversation,
 } from "../api/conversationApi.js";
 import {
@@ -20,7 +23,7 @@ import {
 } from "../api/messageApi.js";
 
 export default function ChatPage() {
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(loadBrowserConversations);
   const [activeId, setActiveId] = useState(null);
   const [chats, setChats] = useState([]);
   const [message, setMessage] = useState("");
@@ -42,6 +45,29 @@ export default function ChatPage() {
     return width >= 220 && width <= 420 ? width : 275;
   });
 
+  const conversationsToPersist = useMemo(
+    () =>
+      history.map((conversation) =>
+        conversation._id === activeId
+          ? { ...conversation, chats }
+          : conversation,
+      ),
+    [history, activeId, chats],
+  );
+  const filteredHistory = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return conversationsToPersist;
+
+    return conversationsToPersist.filter((conversation) => {
+      const contents = (conversation.chats || [])
+        .map((chat) => `${chat.message || ""} ${chat.reply || ""}`)
+        .join(" ");
+      return `${conversation.title || ""} ${contents}`
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [conversationsToPersist, search]);
+
   const endRef = useRef(null);
   const abortRef = useRef(null);
   const resizingRef = useRef(false);
@@ -53,9 +79,8 @@ export default function ChatPage() {
   }, [dark]);
 
   useEffect(() => {
-    const timer = setTimeout(() => loadHistory(search), 300);
-    return () => clearTimeout(timer);
-  }, [search]);
+    saveBrowserConversations(conversationsToPersist);
+  }, [conversationsToPersist]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -98,18 +123,6 @@ export default function ChatPage() {
     };
   }, []);
 
-  async function loadHistory(query = "") {
-    try {
-      const res = await listConversations(query);
-
-      if (!res.ok) throw new Error("Could not load chat history");
-
-      setHistory(await res.json());
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   async function refreshConversation(id) {
     const res = await getConversation(id);
 
@@ -120,6 +133,15 @@ export default function ChatPage() {
     const data = await res.json();
     setChats(data.chats || []);
     setActiveId(id);
+    setHistory((previous) =>
+      previous
+        .map((item) =>
+          item._id === id
+            ? { ...item, ...data.conversation, chats: data.chats || [] }
+            : item,
+        )
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)),
+    );
     return data.chats || [];
   }
 
@@ -134,23 +156,17 @@ export default function ChatPage() {
   async function openChat(id) {
     if (loading) return;
 
-    try {
-      setError("");
-
-      const res = await getConversation(id);
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Could not open chat");
-      }
-
-      setActiveId(id);
-      setChats(data.chats || []);
-      setMessage("");
-      setMobileSidebarOpen(false);
-    } catch (err) {
-      setError(err.message);
+    const conversation = history.find((item) => item._id === id);
+    if (!conversation) {
+      setError("This conversation is not saved in this browser.");
+      return;
     }
+
+    setError("");
+    setActiveId(id);
+    setChats(conversation.chats || []);
+    setMessage("");
+    setMobileSidebarOpen(false);
   }
 
   function newChat() {
@@ -190,12 +206,16 @@ export default function ChatPage() {
         }
 
         const res = await renameConversation(item._id, title);
-
         const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Rename failed");
 
-        if (!res.ok) {
-          throw new Error(data.error || "Rename failed");
-        }
+        setHistory((previous) =>
+          previous.map((conversation) =>
+            conversation._id === item._id
+              ? { ...conversation, ...data, title }
+              : conversation,
+          ),
+        );
       } else {
         const res = await deleteConversation(item._id);
 
@@ -210,10 +230,13 @@ export default function ChatPage() {
           setChats([]);
           setMessage("");
         }
+
+        setHistory((previous) =>
+          previous.filter((conversation) => conversation._id !== item._id),
+        );
       }
 
       setModal(null);
-      await loadHistory(search);
     } catch (err) {
       setError(err.message || "Action failed");
     }
@@ -265,6 +288,14 @@ export default function ChatPage() {
         }
 
         id = created._id;
+        setHistory((previous) =>
+          previous.some((conversation) => conversation._id === id)
+            ? previous
+            : [
+                { ...created, chats: [] },
+                ...previous,
+              ],
+        );
         setActiveId(id);
       }
 
@@ -348,7 +379,6 @@ export default function ChatPage() {
 
       // Fetch the saved MongoDB chat IDs after generation finishes.
       await refreshConversation(id);
-      await loadHistory(search);
     } catch (err) {
       if (err.name === "AbortError") {
         setChats((prev) =>
@@ -444,7 +474,7 @@ export default function ChatPage() {
       )}
 
       <ChatSidebar
-        history={history}
+        history={filteredHistory}
         activeId={activeId}
         loading={loading}
         search={search}
