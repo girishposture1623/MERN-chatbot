@@ -30,7 +30,7 @@ function normalizeResults(results) {
 
 export async function addTinyFishSearchContext(messages, fetchImpl = fetch) {
   const apiKey = process.env.TINYFISH_API_KEY?.trim();
-  if (!apiKey || !Array.isArray(messages)) return messages;
+  if (!Array.isArray(messages)) return messages;
 
   let userIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -43,24 +43,43 @@ export async function addTinyFishSearchContext(messages, fetchImpl = fetch) {
 
   const query = getSearchQuery(messages[userIndex].content);
   if (!query) return messages;
+  if (!apiKey) {
+    console.info("[tinyfish] search skipped (API key not configured)");
+    return messages;
+  }
 
   try {
     const url = new URL(TINYFISH_SEARCH_URL);
     url.searchParams.set("query", query);
+    url.searchParams.set("location", "US");
+    url.searchParams.set("language", "en");
+    console.info("[tinyfish] search started");
     const response = await fetchImpl(url, {
       method: "GET",
-      headers: { "X-API-Key": apiKey },
+      headers: {
+        "X-API-Key": apiKey,
+        "X-TF-Request-Origin": "api",
+        "X-TF-API-Source": "onboarding",
+        "X-TF-API-Example": "curl-search",
+        "X-TF-Connect-Source": "setup_page",
+        "X-TF-Connect-Client": "curl",
+      },
       signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
     });
     if (!response.ok) {
-      console.warn(`[tinyfish] search unavailable (HTTP ${response.status}); continuing without web results`);
+      console.warn(`[tinyfish] search failed (HTTP ${response.status}); continuing without web results`);
       return messages;
     }
 
     const payload = await response.json();
+    if (!Array.isArray(payload?.results)) {
+      console.warn("[tinyfish] search failed (unexpected response format); continuing without web results");
+      return messages;
+    }
     const results = normalizeResults(payload?.results);
+    console.info(`[tinyfish] search succeeded (results=${results.length})`);
     if (!results.length) {
-      console.info("[tinyfish] search returned no usable results; continuing without web results");
+      console.info("[tinyfish] no usable results; continuing without web results");
       return messages;
     }
 
@@ -74,7 +93,11 @@ export async function addTinyFishSearchContext(messages, fetchImpl = fetch) {
         : message
     );
   } catch (error) {
-    const reason = error?.name === "TimeoutError" ? "timed out" : "failed";
+    const reason = error?.name === "TimeoutError"
+      ? "timed out"
+      : error instanceof SyntaxError
+        ? "failed (invalid JSON response)"
+        : "failed (network or request error)";
     console.warn(`[tinyfish] search ${reason}; continuing without web results`);
     return messages;
   }

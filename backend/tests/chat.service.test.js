@@ -81,14 +81,19 @@ test("provider model defaults use currently documented Groq and Gemini model IDs
 
 test("TinyFish is called only for explicit web searches and its results enrich a copied prompt", async () => {
   const originalKey = process.env.TINYFISH_API_KEY;
+  const originalInfo = console.info;
+  const originalWarn = console.warn;
+  const logs = [];
   process.env.TINYFISH_API_KEY = "tinyfish-test-key";
-  const messages = [{ role: "user", content: "Can you search the web for current MERN guidance?" }];
+  const messages = [{ role: "user", content: "Can you search the web for C++ & Node.js?" }];
   let requestedUrl;
-  let requestedKey;
+  let requestHeaders;
+  console.info = (...args) => logs.push(args.join(" "));
+  console.warn = (...args) => logs.push(args.join(" "));
   try {
     const enriched = await addTinyFishSearchContext(messages, async (url, options) => {
       requestedUrl = new URL(url);
-      requestedKey = options.headers["X-API-Key"];
+      requestHeaders = options.headers;
       return {
         ok: true,
         json: async () => ({
@@ -98,11 +103,24 @@ test("TinyFish is called only for explicit web searches and its results enrich a
     });
 
     assert.equal(requestedUrl.origin, "https://api.search.tinyfish.ai");
-    assert.equal(requestedUrl.searchParams.get("query"), "current MERN guidance?");
-    assert.equal(requestedKey, "tinyfish-test-key");
+    assert.equal(requestedUrl.searchParams.get("query"), "C++ & Node.js?");
+    assert.equal(requestedUrl.searchParams.get("location"), "US");
+    assert.equal(requestedUrl.searchParams.get("language"), "en");
+    assert.match(requestedUrl.search, /C%2B%2B\+%26\+Node\.js%3F/);
+    assert.deepEqual(requestHeaders, {
+      "X-API-Key": "tinyfish-test-key",
+      "X-TF-Request-Origin": "api",
+      "X-TF-API-Source": "onboarding",
+      "X-TF-API-Example": "curl-search",
+      "X-TF-Connect-Source": "setup_page",
+      "X-TF-Connect-Client": "curl",
+    });
     assert.match(enriched[0].content, /MERN guide/);
     assert.match(enriched[0].content, /https:\/\/example\.com\/mern/);
-    assert.equal(messages[0].content, "Can you search the web for current MERN guidance?");
+    assert.equal(messages[0].content, "Can you search the web for C++ & Node.js?");
+    assert.equal(logs.some((entry) => entry.includes("search started")), true);
+    assert.equal(logs.some((entry) => entry.includes("search succeeded (results=1)")), true);
+    assert.equal(logs.join(" ").includes("tinyfish-test-key"), false);
 
     let wasCalled = false;
     const untouched = await addTinyFishSearchContext(
@@ -112,6 +130,8 @@ test("TinyFish is called only for explicit web searches and its results enrich a
     assert.equal(wasCalled, false);
     assert.equal(untouched[0].content, "Explain how MongoDB indexes work.");
   } finally {
+    console.info = originalInfo;
+    console.warn = originalWarn;
     if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
     else process.env.TINYFISH_API_KEY = originalKey;
   }
@@ -119,15 +139,43 @@ test("TinyFish is called only for explicit web searches and its results enrich a
 
 test("TinyFish failures leave the conversation input unchanged", async () => {
   const originalKey = process.env.TINYFISH_API_KEY;
+  const originalWarn = console.warn;
+  const logs = [];
   process.env.TINYFISH_API_KEY = "tinyfish-test-key";
   const messages = [{ role: "user", content: "Search the web for current MERN guidance." }];
+  console.warn = (...args) => logs.push(args.join(" "));
   try {
     const enriched = await addTinyFishSearchContext(messages, async () => ({
       ok: false,
       status: 503,
     }));
     assert.equal(enriched, messages);
+    assert.equal(logs.some((entry) => entry.includes("HTTP 503")), true);
+    assert.equal(logs.join(" ").includes("tinyfish-test-key"), false);
   } finally {
+    console.warn = originalWarn;
+    if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
+    else process.env.TINYFISH_API_KEY = originalKey;
+  }
+});
+
+test("TinyFish explicit search skips the request when its API key is missing", async () => {
+  const originalKey = process.env.TINYFISH_API_KEY;
+  const originalInfo = console.info;
+  const logs = [];
+  delete process.env.TINYFISH_API_KEY;
+  console.info = (...args) => logs.push(args.join(" "));
+  let wasCalled = false;
+  const messages = [{ role: "user", content: "Search the web for current MERN guidance." }];
+  try {
+    const result = await addTinyFishSearchContext(messages, async () => {
+      wasCalled = true;
+    });
+    assert.equal(result, messages);
+    assert.equal(wasCalled, false);
+    assert.equal(logs.some((entry) => entry.includes("API key not configured")), true);
+  } finally {
+    console.info = originalInfo;
     if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
     else process.env.TINYFISH_API_KEY = originalKey;
   }
