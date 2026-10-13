@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { generateReplyStream, providers, summarizeProviderError } from "../services/chat.service.js";
+import { addTinyFishSearchContext } from "../services/tinyfish.service.js";
 
 test("provider fallback continues after an HTTP error and streams the next provider", async () => {
   const originalStreams = providers.map((provider) => provider.stream);
@@ -74,5 +75,59 @@ test("provider model defaults use currently documented Groq and Gemini model IDs
     else process.env.GROQ_MODEL = originalGroq;
     if (originalGemini === undefined) delete process.env.GEMINI_MODEL;
     else process.env.GEMINI_MODEL = originalGemini;
+  }
+});
+
+test("TinyFish is called only for explicit web searches and its results enrich a copied prompt", async () => {
+  const originalKey = process.env.TINYFISH_API_KEY;
+  process.env.TINYFISH_API_KEY = "tinyfish-test-key";
+  const messages = [{ role: "user", content: "Can you search the web for current MERN guidance?" }];
+  let requestedUrl;
+  let requestedKey;
+  try {
+    const enriched = await addTinyFishSearchContext(messages, async (url, options) => {
+      requestedUrl = new URL(url);
+      requestedKey = options.headers["X-API-Key"];
+      return {
+        ok: true,
+        json: async () => ({
+          results: [{ title: "MERN guide", url: "https://example.com/mern", snippet: "A useful guide." }],
+        }),
+      };
+    });
+
+    assert.equal(requestedUrl.origin, "https://api.search.tinyfish.ai");
+    assert.equal(requestedUrl.searchParams.get("query"), "current MERN guidance?");
+    assert.equal(requestedKey, "tinyfish-test-key");
+    assert.match(enriched[0].content, /MERN guide/);
+    assert.match(enriched[0].content, /https:\/\/example\.com\/mern/);
+    assert.equal(messages[0].content, "Can you search the web for current MERN guidance?");
+
+    let wasCalled = false;
+    const untouched = await addTinyFishSearchContext(
+      [{ role: "user", content: "Explain how MongoDB indexes work." }],
+      async () => { wasCalled = true; }
+    );
+    assert.equal(wasCalled, false);
+    assert.equal(untouched[0].content, "Explain how MongoDB indexes work.");
+  } finally {
+    if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
+    else process.env.TINYFISH_API_KEY = originalKey;
+  }
+});
+
+test("TinyFish failures leave the conversation input unchanged", async () => {
+  const originalKey = process.env.TINYFISH_API_KEY;
+  process.env.TINYFISH_API_KEY = "tinyfish-test-key";
+  const messages = [{ role: "user", content: "Search the web for current MERN guidance." }];
+  try {
+    const enriched = await addTinyFishSearchContext(messages, async () => ({
+      ok: false,
+      status: 503,
+    }));
+    assert.equal(enriched, messages);
+  } finally {
+    if (originalKey === undefined) delete process.env.TINYFISH_API_KEY;
+    else process.env.TINYFISH_API_KEY = originalKey;
   }
 });

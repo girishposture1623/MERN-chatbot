@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Conversation from "../models/Conversation.js";
 import Chat from "../models/Chat.js";
 import { generateReply, generateReplyStream } from "../services/chat.service.js";
+import { addTinyFishSearchContext } from "../services/tinyfish.service.js";
 import {
   escapeRegex,
   getHistoryMessages,
@@ -203,7 +204,7 @@ const messagepost =  async (req, res) => {
       content: message.trim(),
     });
 
-    const reply = await generateReply(messages);
+    const reply = await generateReply(await addTinyFishSearchContext(messages));
 
     const chat = await saveConversationReply({
       conversation,
@@ -253,7 +254,8 @@ const messagegetbyId =  async (req, res) => {
         content: message.trim(),
       });
 
-      for await (const part of generateReplyStream(messages)) {
+      const generationMessages = await addTinyFishSearchContext(messages);
+      for await (const part of generateReplyStream(generationMessages)) {
         if (res.destroyed || res.writableEnded) return;
         if (typeof part?.text !== "string" || !part.text) continue;
 
@@ -349,7 +351,8 @@ const messagegetbyId =  async (req, res) => {
         let reply = "";
         let selectedProvider = null;
   
-        for await (const part of generateReplyStream(messages)) {
+        const generationMessages = await addTinyFishSearchContext(messages);
+        for await (const part of generateReplyStream(generationMessages)) {
           if (res.destroyed || res.writableEnded) return;
           if (typeof part?.text !== "string" || !part.text) continue;
 
