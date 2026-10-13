@@ -8,6 +8,7 @@ const SYSTEM_INSTRUCTION = [
   "For simple questions, answer briefly. Give detail only when requested or genuinely needed.",
   "Use Markdown formatting when it improves readability.",
 ].join(" ");
+const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-31b-it:free";
 
 let openrouter;
 let groq;
@@ -43,8 +44,13 @@ export const providers = [
     name: "OpenRouter",
     enabled: () => Boolean(process.env.OPENROUTER_API_KEY),
     stream: async function* (messages) {
+      const configuredModel = process.env.OPENROUTER_MODEL?.trim();
+      const model =
+        configuredModel && configuredModel !== "openrouter/free"
+          ? configuredModel
+          : OPENROUTER_DEFAULT_MODEL;
       const result = await getOpenRouter().chat.completions.create({
-        model: process.env.OPENROUTER_MODEL || "openrouter/free",
+        model,
         messages,
         stream: true,
       });

@@ -4,6 +4,17 @@ import NeuralPulse from "./NeuralPulse.jsx";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 
+function hideSafetyMetadata(reply) {
+  if (typeof reply !== "string") return "";
+
+  return reply
+    .replace(
+      /(?:User|Response)\s+Safety\s*:\s*(?:safe|unsafe)(?=\s|$|(?:User|Response)\s+Safety\s*:)/gi,
+      "",
+    )
+    .trim();
+}
+
 export default function MessageList({ chats, loading, regenerateReply, endRef }) {
   return (
     <section className="messages">
@@ -22,7 +33,7 @@ export default function MessageList({ chats, loading, regenerateReply, endRef })
             <div className="bot-avatar"><ChatLogo /></div>
             <div className="bot-content">
               <strong>AI Assistant</strong>
-              {chat.reply ? (
+              {hideSafetyMetadata(chat.reply) ? (
                 <div className="markdown-content">
                   <ReactMarkdown
                     remarkPlugins={[remarkBreaks]}
@@ -39,9 +50,13 @@ export default function MessageList({ chats, loading, regenerateReply, endRef })
                       ),
                     }}
                   >
-                    {chat.reply}
+                    {hideSafetyMetadata(chat.reply)}
                   </ReactMarkdown>
                 </div>
+              ) : chat.reply && !chat.streaming ? (
+                <p className="stopped-label">
+                  This provider did not return a chat response. Regenerate to try again.
+                </p>
               ) : chat.streaming && !chat.stopped ? (
                 <NeuralPulse />
               ) : chat.stopped ? (
