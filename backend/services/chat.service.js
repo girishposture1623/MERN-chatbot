@@ -36,22 +36,84 @@ function getOpenRouterModel() {
 }
 
 function getGroqModel() {
-  return process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+  return process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-120b";
 }
 
 function getGeminiModel() {
-  return process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  return process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
 }
 
-function providerErrorInfo(error) {
+const SECRET_KEY_PATTERN = /(?:Bearer\s+)[A-Za-z0-9._~+/=-]+|\bsk-[A-Za-z0-9_-]{12,}\b|\bAIza[A-Za-z0-9_-]{20,}\b/gi;
+const REDACTED_ERROR_FIELDS = /(?:api.?key|authorization|secret|token|prompt|content|input|credential)/i;
+
+function redactDiagnosticText(value) {
+  return String(value).replace(SECRET_KEY_PATTERN, "[REDACTED]").slice(0, 1200);
+}
+
+function sanitizeDiagnosticValue(value, depth = 0) {
+  if (typeof value === "string") return redactDiagnosticText(value);
+  if (typeof value === "number" || typeof value === "boolean" || value == null) return value;
+  if (depth >= 5) return "[TRUNCATED]";
+  if (Array.isArray(value)) return value.slice(0, 12).map((item) => sanitizeDiagnosticValue(item, depth + 1));
+  if (typeof value !== "object") return undefined;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !REDACTED_ERROR_FIELDS.test(key))
+      .slice(0, 30)
+      .map(([key, item]) => [key, sanitizeDiagnosticValue(item, depth + 1)])
+  );
+}
+
+function getProviderErrorBody(error) {
+  let body = error?.error ?? error?.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return redactDiagnosticText(body);
+    }
+  }
+  return body && typeof body === "object" ? sanitizeDiagnosticValue(body) : undefined;
+}
+
+function getRateLimitHeaders(headers) {
+  if (!headers) return undefined;
+  const selected = {};
+  const allowHeader = (name) =>
+    name === "retry-after" || name === "retry-after-ms" || name === "x-request-id" ||
+    name === "request-id" || name.startsWith("x-ratelimit-") || name.startsWith("ratelimit-");
+
+  if (typeof headers.forEach === "function") {
+    headers.forEach((value, name) => {
+      const normalizedName = String(name).toLowerCase();
+      if (allowHeader(normalizedName)) selected[normalizedName] = redactDiagnosticText(value);
+    });
+  } else if (typeof headers === "object") {
+    for (const [name, value] of Object.entries(headers)) {
+      const normalizedName = name.toLowerCase();
+      if (allowHeader(normalizedName)) selected[normalizedName] = redactDiagnosticText(value);
+    }
+  }
+  return Object.keys(selected).length ? selected : undefined;
+}
+
+export function summarizeProviderError(error) {
   const status = Number.isInteger(error?.status) ? error.status : undefined;
   const code =
     typeof error?.code === "string" && /^[a-z0-9_-]{1,64}$/i.test(error.code)
       ? error.code
       : undefined;
+  const body = getProviderErrorBody(error);
+  const headers = getRateLimitHeaders(error?.headers ?? error?.response?.headers);
+  const requestId = typeof error?.requestID === "string"
+    ? redactDiagnosticText(error.requestID)
+    : undefined;
   return {
     ...(status ? { status } : {}),
     ...(code ? { code } : {}),
+    ...(body ? { body } : {}),
+    ...(headers ? { headers } : {}),
+    ...(requestId ? { requestId } : {}),
     category:
       status === 401 || status === 403
         ? "authentication_or_permission"
@@ -88,7 +150,11 @@ function getGroq() {
 }
 
 function getGemini() {
-  gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  gemini ??= new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    apiVersion: "v1beta",
+    httpOptions: { baseUrl: "https://generativelanguage.googleapis.com" },
+  });
   return gemini;
 }
 
@@ -196,7 +262,7 @@ export async function* generateReplyStream(messages) {
       errors.push(`${provider.name}: empty response`);
       console.warn(`[ai] ${provider.name}: empty or malformed response`);
     } catch (error) {
-      const info = providerErrorInfo(error);
+      const info = summarizeProviderError(error);
       console.error(`[ai] ${provider.name}: request failed`, info);
       if (yieldedAny) {
         throw new Error(`${provider.name} failed after response streaming began`);
